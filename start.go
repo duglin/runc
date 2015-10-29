@@ -83,54 +83,27 @@ func init() {
 }
 
 func startContainer(context *cli.Context, spec *specs.LinuxSpec, rspec *specs.LinuxRuntimeSpec) (int, error) {
-	config, err := createLibcontainerConfig(context.GlobalString("id"), spec, rspec)
+	container, err := createContainer(context, spec, rspec)
 	if err != nil {
 		return -1, err
 	}
-	if _, err := os.Stat(config.Rootfs); err != nil {
-		if os.IsNotExist(err) {
-			return -1, fmt.Errorf("Rootfs (%q) does not exist", config.Rootfs)
-		}
-		return -1, err
-	}
-	rootuid, err := config.HostUID()
-	if err != nil {
-		return -1, err
-	}
-	factory, err := loadFactory(context)
-	if err != nil {
-		return -1, err
-	}
-	container, err := factory.Create(context.GlobalString("id"), config)
-	if err != nil {
-		return -1, err
-	}
-	// ensure that the container is always removed if we were the process
-	// that created it.
-	defer destroy(container)
-
-	process := newProcess(spec.Process)
+	defer deleteContainer(container) // delete when process dies
 
 	// Support on-demand socket activation by passing file descriptors into the container init process.
-	if os.Getenv("LISTEN_FDS") != "" {
-		listenFdsInt, err := strconv.Atoi(os.Getenv("LISTEN_FDS"))
+	extraFDs := []int{}
+
+	if fds := os.Getenv("LISTEN_FDS"); fds != "" {
+		listenFdsInt, err := strconv.Atoi(fds)
 		if err != nil {
 			return -1, err
 		}
-		for i := SD_LISTEN_FDS_START; i < (listenFdsInt + SD_LISTEN_FDS_START); i++ {
-			process.ExtraFiles = append(process.ExtraFiles, os.NewFile(uintptr(i), ""))
+
+		for i := 0; i < listenFdsInt; i++ {
+			extraFDs = append(extraFDs, SD_LISTEN_FDS_START+i)
 		}
 	}
-	tty, err := newTty(spec.Process.Terminal, process, rootuid, context.String("console"))
-	if err != nil {
-		return -1, err
-	}
-	handler := newSignalHandler(tty)
-	defer handler.Close()
-	if err := container.Start(process); err != nil {
-		return -1, err
-	}
-	return handler.forward(process)
+
+	return runProcess(container, &spec.Process, extraFDs, context.String("console"))
 }
 
 // If systemd is supporting sd_notify protocol, this function will add support

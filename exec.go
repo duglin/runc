@@ -46,22 +46,8 @@ func execProcess(context *cli.Context, config *specs.Process) (int, error) {
 	if err != nil {
 		return -1, err
 	}
-	process := newProcess(*config)
 
-	rootuid, err := container.Config().HostUID()
-	if err != nil {
-		return -1, err
-	}
-	tty, err := newTty(config.Terminal, process, rootuid, context.String("console"))
-	if err != nil {
-		return -1, err
-	}
-	handler := newSignalHandler(tty)
-	defer handler.Close()
-	if err := container.Start(process); err != nil {
-		return -1, err
-	}
-	return handler.forward(process)
+	return runProcess(container, config, nil, context.String("console"))
 }
 
 // loadProcessConfig loads the process configuration from the provided path.
