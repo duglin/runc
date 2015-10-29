@@ -173,6 +173,44 @@ func (c *linuxContainer) Set(config configs.Config) error {
 	return c.cgroupManager.Set(c.config)
 }
 
+// Create will initialize(create) a new container by
+// creating the namespaces associated with it.
+func (c *linuxContainer) Create(process *Process) error {
+	c.m.Lock()
+	defer c.m.Unlock()
+
+	/*
+		status, err := c.currentStatus()
+		if err != nil {
+			return err
+		}
+	*/
+
+	parent, err := c.newParentProcess(process, initCreate)
+	if err != nil {
+		return newSystemError(err)
+	}
+	if err := parent.start(); err != nil {
+		// terminate the process to ensure that it properly is reaped.
+		if err := parent.terminate(); err != nil {
+			logrus.Warn(err)
+		}
+		return newSystemError(err)
+	}
+
+	if err := c.updateState(parent); err != nil {
+		return err
+	}
+
+	// Wait for process to end
+	_, err = parent.wait()
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (c *linuxContainer) Start(process *Process) error {
 	c.m.Lock()
 	defer c.m.Unlock()
@@ -180,8 +218,17 @@ func (c *linuxContainer) Start(process *Process) error {
 	if err != nil {
 		return err
 	}
-	doInit := status == Destroyed
-	parent, err := c.newParentProcess(process, doInit)
+
+	// doInit will be true if we're creating the main proc of the container.
+	// Otherwise we're just joining the namespaces of the existing proc.
+	doInit := status == Created
+
+	it := initStandard
+	if !doInit {
+		it = initSetns
+	}
+
+	parent, err := c.newParentProcess(process, it)
 	if err != nil {
 		return newSystemError(err)
 	}
@@ -229,7 +276,7 @@ func (c *linuxContainer) Signal(s os.Signal) error {
 	return nil
 }
 
-func (c *linuxContainer) newParentProcess(p *Process, doInit bool) (parentProcess, error) {
+func (c *linuxContainer) newParentProcess(p *Process, it initType) (parentProcess, error) {
 	parentPipe, childPipe, err := newPipe()
 	if err != nil {
 		return nil, newSystemError(err)
@@ -238,10 +285,15 @@ func (c *linuxContainer) newParentProcess(p *Process, doInit bool) (parentProces
 	if err != nil {
 		return nil, newSystemError(err)
 	}
-	if !doInit {
+	switch it {
+	case initCreate:
+		return c.newCreateProcess(p, cmd, parentPipe, childPipe)
+	case initSetns:
 		return c.newSetnsProcess(p, cmd, parentPipe, childPipe)
+	case initStandard:
+		return c.newInitProcess(p, cmd, parentPipe, childPipe)
 	}
-	return c.newInitProcess(p, cmd, parentPipe, childPipe)
+	panic(fmt.Sprintf("should not get here - it: %v", it))
 }
 
 func (c *linuxContainer) commandTemplate(p *Process, childPipe *os.File) (*exec.Cmd, error) {
@@ -265,6 +317,35 @@ func (c *linuxContainer) commandTemplate(p *Process, childPipe *os.File) (*exec.
 		cmd.SysProcAttr.Pdeathsig = syscall.Signal(c.config.ParentDeathSignal)
 	}
 	return cmd, nil
+}
+
+// newCreateProcess is the same as newInitProcess except the INITTYPE value
+// will differ.
+func (c *linuxContainer) newCreateProcess(p *Process, cmd *exec.Cmd, parentPipe, childPipe *os.File) (*initProcess, error) {
+	t := "_LIBCONTAINER_INITTYPE=" + string(initCreate)
+	cloneFlags := c.config.Namespaces.CloneFlags()
+	if cloneFlags&syscall.CLONE_NEWUSER != 0 {
+		if err := c.addUidGidMappings(cmd.SysProcAttr); err != nil {
+			// user mappings are not supported
+			return nil, err
+		}
+		enableSetgroups(cmd.SysProcAttr)
+		// Default to root user when user namespaces are enabled.
+		if cmd.SysProcAttr.Credential == nil {
+			cmd.SysProcAttr.Credential = &syscall.Credential{}
+		}
+	}
+	cmd.Env = append(cmd.Env, t)
+	cmd.SysProcAttr.Cloneflags = cloneFlags
+	return &initProcess{
+		cmd:        cmd,
+		childPipe:  childPipe,
+		parentPipe: parentPipe,
+		manager:    c.cgroupManager,
+		config:     c.newInitConfig(p),
+		container:  c,
+		process:    p,
+	}, nil
 }
 
 func (c *linuxContainer) newInitProcess(p *Process, cmd *exec.Cmd, parentPipe, childPipe *os.File) (*initProcess, error) {
@@ -338,6 +419,28 @@ func newPipe() (parent *os.File, child *os.File, err error) {
 func (c *linuxContainer) Destroy() error {
 	c.m.Lock()
 	defer c.m.Unlock()
+
+	namespaces := []string{"NEWIPC", "NEWUTS", "NEWNET", "NEWPID", "NEWUSER", "NEWNS", "NEWMNT"}
+
+	for _, key := range namespaces {
+		mount := filepath.Join(c.root, string(key))
+		if _, err := os.Stat(mount); err != nil {
+			// Unknown namespace mounts are ok to skip
+			continue
+		}
+		err := syscall.Unmount(mount, syscall.MNT_DETACH)
+		if err != nil {
+			// Ignore any error since it probably means something
+			// went wrong during setup and its ok to just remove it in
+			// the next step
+			// return fmt.Errorf("Unmount err(%s): %v", mount, err)
+		}
+		err = os.Remove(mount)
+		if err != nil {
+			return fmt.Errorf("Remove err(%s): %v", mount, err)
+		}
+	}
+
 	return c.state.destroy()
 }
 

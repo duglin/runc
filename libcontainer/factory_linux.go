@@ -252,6 +252,7 @@ func (l *LinuxFactory) StartInitialization() (err error) {
 		// ensure that this pipe is always closed
 		pipe.Close()
 	}()
+
 	i, err = newContainerInit(it, pipe)
 	if err != nil {
 		return err

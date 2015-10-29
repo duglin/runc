@@ -9,31 +9,18 @@ import (
 
 	"github.com/opencontainers/runc/libcontainer/apparmor"
 	"github.com/opencontainers/runc/libcontainer/configs"
-	"github.com/opencontainers/runc/libcontainer/keys"
 	"github.com/opencontainers/runc/libcontainer/label"
 	"github.com/opencontainers/runc/libcontainer/seccomp"
 	"github.com/opencontainers/runc/libcontainer/system"
 )
 
-type linuxStandardInit struct {
+type linuxCreateInit struct {
 	pipe      io.ReadWriter
 	parentPid int
 	config    *initConfig
 }
 
-func (l *linuxStandardInit) Init() error {
-	// do not inherit the parent's session keyring
-	sessKeyId, err := keyctl.JoinSessionKeyring("")
-	if err != nil {
-		return err
-	}
-	// make session keyring searcheable
-	// without user ns we need 'UID' search permissions
-	// with user ns we need 'other' search permissions
-	if err := keyctl.ModKeyringPerm(sessKeyId, 0xffffffff, 0x080008); err != nil {
-		return err
-	}
-
+func (l *linuxCreateInit) Init() error {
 	// join any namespaces via a path to the namespace fd if provided
 	if err := joinExistingNamespaces(l.config.Config.Namespaces); err != nil {
 		return err
@@ -130,5 +117,6 @@ func (l *linuxStandardInit) Init() error {
 		return syscall.Kill(syscall.Getpid(), syscall.SIGKILL)
 	}
 
-	return system.Execv(l.config.Args[0], l.config.Args[0:], os.Environ())
+	os.Exit(0)
+	return nil
 }

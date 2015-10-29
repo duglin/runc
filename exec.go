@@ -11,6 +11,7 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	"github.com/codegangsta/cli"
+	"github.com/opencontainers/runc/libcontainer"
 )
 
 var execCommand = cli.Command{
@@ -59,6 +60,14 @@ func execProcess(context *cli.Context, args []string) (int, error) {
 		return -1, err
 	}
 
+	status, err := container.Status()
+	if err != nil {
+		return -1, err
+	}
+	if status != libcontainer.Running {
+		return -1, fmt.Errorf("Container not running")
+	}
+
 	bundle := container.Config().Rootfs
 	if err := os.Chdir(path.Dir(bundle)); err != nil {
 		return -1, err
@@ -102,23 +111,7 @@ func execProcess(context *cli.Context, args []string) (int, error) {
 		p.User.UID = uint32(uid)
 	}
 
-	process := newProcess(p)
-	process.Args = args
-	rootuid, err := container.Config().HostUID()
-	if err != nil {
-		return -1, err
-	}
+	p.Args = args
 
-	tty, err := newTty(p.Terminal, process, rootuid, context.String("console"))
-	if err != nil {
-		return -1, err
-	}
-
-	handler := newSignalHandler(tty)
-	defer handler.Close()
-	if err := container.Start(process); err != nil {
-		return -1, err
-	}
-
-	return handler.forward(process)
+	return runProcess(container, &p, nil, context.String("console"), context.String("pid-file"), false)
 }

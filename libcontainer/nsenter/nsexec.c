@@ -91,7 +91,7 @@ void nsexec()
 
 	// if we dont have INITTYPE or this is the init process, skip the bootstrap process
 	val = getenv("_LIBCONTAINER_INITTYPE");
-	if (val == NULL || strcmp(val, "standard") == 0) {
+	if (val == NULL || strcmp(val, "standard") == 0 || strcmp(val, "create") == 0) {
 		return;
 	}
 	if (strcmp(val, "setns") != 0) {
